@@ -1,11 +1,10 @@
+import os
+import time
+import subprocess
+from datetime import datetime
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import *
-from users_db import get_user, stats
-from bans_db import is_banned, ban, unban
-from watermark import watermark_video
-import os
-from datetime import datetime
 from threading import Thread
 from flask import Flask
 
@@ -20,6 +19,29 @@ def run():
 
 Thread(target=run).start()
 
+# ✅ IMPORT CONFIG
+from config import (
+    API_ID, API_HASH, BOT_TOKEN,
+    OWNER_ID, LOG_CHANNEL,
+    MAX_FILE_SIZE,
+    DEFAULT_TEXT, DEFAULT_SCALE, DEFAULT_POSITION
+)
+
+print("🚀 bot.py loaded", flush=True)
+
+# =========================
+# BASIC CONFIG CHECK
+# =========================
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    print("❌ config.py values missing", flush=True)
+    while True:
+        time.sleep(10)
+
+print("✅ config.py loaded successfully", flush=True)
+
+# =========================
+# BOT INIT
+# =========================
 app = Client(
     "watermark_bot",
     api_id=API_ID,
@@ -27,59 +49,74 @@ app = Client(
     bot_token=BOT_TOKEN
 )
 
+# =========================
+# MEMORY DB
+# =========================
+USERS = {}
+STATS = {"users": set(), "processed": 0}
+
+def get_user(uid):
+    STATS["users"].add(uid)
+    if uid not in USERS:
+        USERS[uid] = {
+            "rename": None,
+            "thumb": None,
+            "scale": DEFAULT_SCALE,
+            "position": DEFAULT_POSITION,
+            "awaiting": None,
+            "last_msg": None
+        }
+    return USERS[uid]
+
+# =========================
+# BUTTONS
+# =========================
 buttons = InlineKeyboardMarkup([
     [
         InlineKeyboardButton("✏️ Rename", callback_data="rename"),
         InlineKeyboardButton("🔁 Default", callback_data="default")
     ],
     [
-        InlineKeyboardButton("🖼 Thumbnail", callback_data="thumb"),
-        InlineKeyboardButton("📏 Scale", callback_data="scale")
-    ],
-    [
-        InlineKeyboardButton("📍 Position", callback_data="position")
-    ],
-    [
         InlineKeyboardButton("▶️ Start Watermark", callback_data="process")
     ]
 ])
 
-# 🔒 BAN CHECK
-@app.on_message(filters.private)
-async def ban_check(_, m):
-    if is_banned(m.from_user.id):
-        await m.stop_propagation()
-
-# 📊 STATS
-@app.on_message(filters.command("stats") & filters.user(OWNER_ID))
-async def stats_cmd(_, m):
+# =========================
+# /start
+# =========================
+@app.on_message(filters.command("start") & filters.private)
+async def start(_, m):
     await m.reply(
-        f"📊 BOT STATS\n\n"
-        f"👥 Users: {len(stats['users'])}\n"
-        f"🎬 Videos: {stats['processed']}"
+        "👋 **Watermark Bot Online**\n\n"
+        "🎥 Ek video bhejo\n"
+        "✏️ Rename (optional)\n"
+        "▶️ Start Watermark dabao"
     )
 
-# 🎥 VIDEO RECEIVE
+# =========================
+# VIDEO RECEIVE
+# =========================
 @app.on_message(filters.private & (filters.video | filters.document))
 async def receive_video(_, m):
-
     media = m.video or m.document
 
     if m.document and not (media.mime_type or "").startswith("video/"):
         return await m.reply("❌ Sirf video files allowed")
 
     if media.file_size > MAX_FILE_SIZE:
-        return await m.reply("❌ Maximum file size 2GB")
+        return await m.reply("❌ Max file size 2GB")
 
     u = get_user(m.from_user.id)
-    u["last_video_msg"] = m
+    u["last_msg"] = m
 
     await m.reply(
-        "👇 Options select karo, phir ▶️ Start Watermark dabao",
+        "👇 Option choose karo",
         reply_markup=buttons
     )
 
-# ✏️ RENAME
+# =========================
+# RENAME
+# =========================
 @app.on_callback_query(filters.regex("^rename$"))
 async def rename(_, cq):
     u = get_user(cq.from_user.id)
@@ -88,85 +125,64 @@ async def rename(_, cq):
     await cq.answer()
 
 @app.on_message(filters.text & filters.private)
-async def text_input(_, m):
+async def save_text(_, m):
     u = get_user(m.from_user.id)
-
     if u.get("awaiting") == "rename":
         u["rename"] = m.text.strip()
         u["awaiting"] = None
         await m.reply("✅ Rename saved")
 
-# 🔁 DEFAULT
+# =========================
+# DEFAULT NAME
+# =========================
 @app.on_callback_query(filters.regex("^default$"))
 async def default(_, cq):
     get_user(cq.from_user.id)["rename"] = None
-    await cq.message.reply("🔁 Default filename set")
+    await cq.message.reply("🔁 Default name set")
     await cq.answer()
 
-# 🖼 THUMB
-@app.on_callback_query(filters.regex("^thumb$"))
-async def thumb(_, cq):
-    u = get_user(cq.from_user.id)
-    u["awaiting"] = "thumb"
-    await cq.message.reply("🖼 Thumbnail photo bhejo")
-    await cq.answer()
-
-@app.on_message(filters.photo & filters.private)
-async def save_thumb(_, m):
-    u = get_user(m.from_user.id)
-    if u.get("awaiting") == "thumb":
-        u["thumb"] = await m.download()
-        u["awaiting"] = None
-        await m.reply("✅ Thumbnail saved")
-
-# 📏 SCALE
-@app.on_callback_query(filters.regex("^scale$"))
-async def scale(_, cq):
-    get_user(cq.from_user.id)["scale"] = DEFAULT_SCALE
-    await cq.message.reply("📏 Scale set")
-    await cq.answer()
-
-# 📍 POSITION
-@app.on_callback_query(filters.regex("^position$"))
-async def position(_, cq):
-    get_user(cq.from_user.id)["position"] = DEFAULT_POSITION
-    await cq.message.reply("📍 Position set")
-    await cq.answer()
-
-# ▶️ PROCESS
+# =========================
+# PROCESS WATERMARK
+# =========================
 @app.on_callback_query(filters.regex("^process$"))
 async def process(_, cq):
-
     u = get_user(cq.from_user.id)
-    msg = u.get("last_video_msg")
+    m = u.get("last_msg")
 
-    if not msg:
-        return await cq.message.reply("❌ Pehle video upload karo")
+    if not m:
+        return await cq.message.reply("❌ Pehle video bhejo")
 
-    status = await cq.message.reply("⏳ Video processing...")
+    status = await cq.message.reply("⏳ Watermark ho raha hai...")
 
-    inp = await msg.download()
+    inp = await m.download()
     out = (u["rename"] or "watermarked") + ".mp4"
 
-    watermark_video(
-        inp,
-        out,
-        DEFAULT_TEXT,
-        "logo.png",
-        u["scale"],
-        u["position"]
-    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", inp,
+        "-vf",
+        f"drawtext=text='{DEFAULT_TEXT}':"
+        f"fontcolor=white@0.85:"
+        f"fontsize=24:"
+        f"x=(w-text_w)/2:y=h-text_h-20",
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        out
+    ]
 
-    stats["processed"] += 1
+    subprocess.run(cmd, check=True)
+
+    STATS["processed"] += 1
 
     await cq.message.reply_video(
         out,
-        thumb=u.get("thumb"),
         supports_streaming=True,
         caption="✅ Watermark added"
     )
 
-    # 📢 LOG CHANNEL
+    # LOG CHANNEL
     try:
         await app.send_message(
             LOG_CHANNEL,
@@ -182,15 +198,5 @@ async def process(_, cq):
     os.remove(inp)
     os.remove(out)
 
-# 🚫 BAN / UNBAN
-@app.on_message(filters.command("ban") & filters.user(OWNER_ID))
-async def ban_user(_, m):
-    ban(int(m.text.split()[1]))
-    await m.reply("🚫 User banned")
-
-@app.on_message(filters.command("unban") & filters.user(OWNER_ID))
-async def unban_user(_, m):
-    unban(int(m.text.split()[1]))
-    await m.reply("✅ User unbanned")
-
+print("🤖 Bot starting...", flush=True)
 app.run()
